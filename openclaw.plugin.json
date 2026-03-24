@@ -1,0 +1,11 @@
+{
+  "id": "time-travel",
+  "name": "Time Travel",
+  "description": "Track agent reply versions and rewind conversation/workspace markdown state to an earlier tag.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
+

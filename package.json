@@ -1,0 +1,17 @@
+{
+  "name": "openclaw-agent-time-travel",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenClaw plugin for conversation and workspace markdown time travel",
+  "type": "module",
+  "openclaw": {
+    "extensions": [
+      "./index.js"
+    ]
+  },
+  "scripts": {
+    "setup-local-sdk": "node ./scripts/link-openclaw.mjs",
+    "smoke-import": "node ./scripts/smoke-import.mjs"
+  }
+}
+
