@@ -2,6 +2,7 @@
   "name": "openclaw-agent-time-travel",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "description": "OpenClaw plugin for conversation and workspace markdown time travel",
   "type": "module",
   "openclaw": {
@@ -14,4 +15,3 @@
     "smoke-import": "node ./scripts/smoke-import.mjs"
   }
 }
-

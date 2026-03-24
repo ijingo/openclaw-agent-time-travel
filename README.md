@@ -1,5 +1,7 @@
 # OpenClaw Time Travel
 
+Working in progress. This plugin is still under active development and the current implementation should be treated as V1-in-progress.
+
 Local OpenClaw plugin that:
 
 - stamps assistant replies with a rewind tag such as `#tt-ab12cd34ef`
@@ -61,3 +63,6 @@ openclaw plugins install /home/ubuntu/workspace/agent/openclaw-agent-time-travel
 - `/versions [n]`
 - `/rewind <tag>`
 
+## License
+
+MIT. See `LICENSE`.
