@@ -154,6 +154,53 @@ V1 只允许回退当前会话自己的 tag，不允许跨会话回退。
    - 确认 transcript 被恢复
    - 确认 rewind 前会生成 backup tag
 
+## 真实运行时联调结果
+
+后续联调中，已经把插件真实安装到当前 npm 安装版 OpenClaw，并完成了一轮 live runtime 验证：
+
+- 插件已通过 `openclaw plugins install --link ...` 安装到当前环境
+- `openclaw gateway restart` 后，systemd 管理的 gateway 已成功加载该插件
+- `openclaw plugins doctor` 无报错
+- `openclaw plugins inspect time-travel` 可见：
+  - commands: `versions`, `rewind`
+  - typed hooks: `after_tool_call`, `before_message_write`, `message_sending`
+  - custom hook: `message:received`
+  - service: `time-travel-service`
+- systemd 日志中可见：
+  - `time-travel service started`
+
+### 已确认真实可用的部分
+
+通过 `openclaw agent` 真实运行了一次新 session 的 agent turn，插件已成功在真实环境中写出：
+
+- `versions.jsonl`
+- transcript snapshot
+- shadow repo commit
+
+对应版本记录示例中已经包含：
+
+- `tag`
+- `sessionKey`
+- `sessionId`
+- `sessionFile`
+- `shadowCommit`
+- `summary`
+
+说明“assistant 回复 -> 版本记录 -> transcript snapshot -> shadow repo 绑定”这一条主链路已经在真实运行时成立。
+
+### 真实环境下确认的限制
+
+`openclaw agent` 这条 CLI 直连路径不会触发插件命令拦截，因此：
+
+- 在 `openclaw agent --message '/versions'` 下，`/versions` 不会进入插件 command handler
+- 它会被当作普通用户消息交给模型处理
+
+这意味着：
+
+- 当前 V1 的 `/versions` 和 `/rewind` 仍然主要面向真实聊天渠道中的对话会话
+- 还没有在 `openclaw agent` 这种 CLI 直连会话里验证 slash command 可用
+- 这不影响版本捕获主链路，但会影响“如何触发回溯命令”的验证范围
+
 ## 当前已知限制
 
 这些限制是 V1 有意保留的，不算偏离设计：
@@ -163,18 +210,19 @@ V1 只允许回退当前会话自己的 tag，不允许跨会话回退。
 - 只追踪默认标准 markdown 文件集合和 `memory/**/*.md`
 - 还没有“列出当前 tracked 文件集合”的用户命令
 - 还没有“用户追加自定义 md 追踪路径”的配置能力
-- 还没有实际接入你本机 OpenClaw 运行中的真安装做联调验证
+- `openclaw agent` CLI 直连路径不会命中插件 slash commands；`/versions` 和 `/rewind` 需要在真实聊天渠道里继续验证
 
 ## TODO
 
 ### 高优先级
 
-- 把插件真正安装到当前 npm 安装版 OpenClaw 中做联调
-- 在真实会话里验证：
+- 在真实聊天渠道会话里验证：
   - tag 是否稳定追加到 assistant 最终回复
   - `/versions` 是否能正确列出当前会话历史
   - `/rewind <tag>` 是否在真实 transcript/session store 下稳定工作
   - memory write 等典型路径是否都能触发 markdown 版本更新
+- 评估是否需要支持 `openclaw agent` CLI 直连会话下的版本命令
+  - 如果要支持，大概率需要额外的宿主侧上下文或命令路由能力
 
 ### 功能扩展
 
@@ -207,4 +255,3 @@ V1 只允许回退当前会话自己的 tag，不允许跨会话回退。
 3. 用一个真实 agent 会话跑几轮消息
 4. 验证 `/versions` 和 `/rewind`
 5. 根据真实行为再修 API 对齐和边界问题
-

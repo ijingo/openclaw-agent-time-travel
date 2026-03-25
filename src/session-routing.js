@@ -3,6 +3,8 @@ import {
 } from "./constants.js";
 import {
   buildLooseRouteKey,
+  expandTargetAliases,
+  extractTargetsFromSessionKey,
   extractThreadIdFromInternalMessageContext,
   normalizeAccountId,
   normalizeTarget,
@@ -50,9 +52,21 @@ export function createSessionRoutingIndex() {
     const channelId = params.channelId || params.channel;
     const accountId = normalizeAccountId(params.accountId);
     const threadId = normalizeThreadId(params.messageThreadId);
-    const candidates = new Set(
-      [normalizeTarget(params.from), normalizeTarget(params.to)].filter(Boolean),
-    );
+    const candidates = new Set();
+    for (const raw of [
+      params.from,
+      params.to,
+      params.conversationId,
+      params.senderId,
+    ]) {
+      const normalized = normalizeTarget(raw);
+      if (!normalized) {
+        continue;
+      }
+      for (const alias of expandTargetAliases(normalized, channelId)) {
+        candidates.add(alias);
+      }
+    }
 
     let best = null;
     for (const route of routes.values()) {
@@ -65,8 +79,11 @@ export function createSessionRoutingIndex() {
       if (threadId && route.threadId && route.threadId !== threadId) {
         continue;
       }
-      const routeTargets = pickRouteTargets(route);
-      const matches = routeTargets.some((value) => candidates.has(value));
+      const routeTargets = pickRouteTargets(route).flatMap((value) =>
+        expandTargetAliases(value, route.channelId),
+      );
+      const matches =
+        candidates.size === 0 ? true : routeTargets.some((value) => candidates.has(value));
       if (!matches) {
         continue;
       }
@@ -83,13 +100,23 @@ export function createSessionRoutingIndex() {
     if (!route?.channelId) {
       return [];
     }
-    return pickRouteTargets(route).map((target) =>
-      buildLooseRouteKey({
-        channelId: route.channelId,
-        accountId: route.accountId,
-        target,
-      }),
-    );
+    const targets = new Set([
+      ...pickRouteTargets(route),
+      ...extractTargetsFromSessionKey(sessionKey),
+    ]);
+    const keys = new Set();
+    for (const target of targets) {
+      for (const alias of expandTargetAliases(target, route.channelId)) {
+        keys.add(
+          buildLooseRouteKey({
+            channelId: route.channelId,
+            accountId: route.accountId,
+            target: alias,
+          }),
+        );
+      }
+    }
+    return [...keys];
   }
 
   return {
@@ -99,4 +126,3 @@ export function createSessionRoutingIndex() {
     buildLooseRouteKeysForSession,
   };
 }
-
