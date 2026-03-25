@@ -48,15 +48,12 @@ export default definePluginEntry({
     );
 
     api.on("before_message_write", (event, ctx) => {
-      controller.prepareAssistantVersion(ctx.sessionKey, event.message);
+      return controller.handleBeforeMessageWrite(event, ctx);
     });
 
     api.on("after_tool_call", (_event, ctx) => {
       return controller.handleAfterToolCall(ctx);
     });
 
-    api.on("message_sending", (event, ctx) => {
-      return controller.handleMessageSending(event, ctx);
-    });
   },
 });

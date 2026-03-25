@@ -32,11 +32,19 @@ export async function loadVersionRecords(agentStateDir) {
   const filePath = resolveVersionsPath(agentStateDir);
   try {
     const raw = await fs.readFile(filePath, "utf8");
-    return raw
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((line) => JSON.parse(line));
+    const records = [];
+    for (const rawLine of raw.split("\n")) {
+      const line = rawLine.trim();
+      if (!line) {
+        continue;
+      }
+      try {
+        records.push(JSON.parse(line));
+      } catch {
+        // Skip corrupt lines so one bad record does not break /versions or /rewind.
+      }
+    }
+    return records;
   } catch {
     return [];
   }
@@ -75,4 +83,3 @@ export async function readTranscriptSnapshot(agentStateDir, tag) {
   const transcriptPath = path.join(resolveSnapshotDir(agentStateDir, tag), "transcript.jsonl");
   return await fs.readFile(transcriptPath, "utf8");
 }
-

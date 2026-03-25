@@ -56,6 +56,90 @@ export function normalizeTarget(value) {
   return trimmed || undefined;
 }
 
+function addAlias(seen, value) {
+  const normalized = normalizeTarget(value);
+  if (!normalized) {
+    return;
+  }
+  seen.add(normalized);
+}
+
+function stripKnownPrefix(value, prefix) {
+  if (!value || !prefix) {
+    return undefined;
+  }
+  const loweredValue = value.toLowerCase();
+  const loweredPrefix = prefix.toLowerCase();
+  if (!loweredValue.startsWith(loweredPrefix)) {
+    return undefined;
+  }
+  const stripped = value.slice(prefix.length);
+  return normalizeTarget(stripped);
+}
+
+export function expandTargetAliases(value, channelId) {
+  const normalized = normalizeTarget(value);
+  if (!normalized) {
+    return [];
+  }
+
+  const seen = new Set();
+  const queue = [normalized];
+  const loweredChannelId =
+    typeof channelId === "string" && channelId.trim() ? channelId.trim().toLowerCase() : "";
+
+  while (queue.length > 0) {
+    const candidate = normalizeTarget(queue.shift());
+    if (!candidate || seen.has(candidate)) {
+      continue;
+    }
+
+    addAlias(seen, candidate);
+    addAlias(seen, candidate.toLowerCase());
+
+    for (const prefix of [
+      loweredChannelId ? `${loweredChannelId}:user:` : "",
+      loweredChannelId ? `${loweredChannelId}:channel:` : "",
+      loweredChannelId ? `${loweredChannelId}:chat:` : "",
+      loweredChannelId ? `${loweredChannelId}:conversation:` : "",
+      loweredChannelId ? `${loweredChannelId}:direct:` : "",
+      loweredChannelId ? `${loweredChannelId}:` : "",
+      "user:",
+      "channel:",
+      "chat:",
+      "conversation:",
+      "direct:",
+    ]) {
+      if (!prefix) {
+        continue;
+      }
+      const stripped = stripKnownPrefix(candidate, prefix);
+      if (stripped && !seen.has(stripped)) {
+        queue.push(stripped);
+      }
+    }
+  }
+
+  const baseValues = [...seen].filter((entry) => !entry.includes(":"));
+  for (const base of baseValues) {
+    addAlias(seen, `user:${base}`);
+    addAlias(seen, `channel:${base}`);
+    addAlias(seen, `chat:${base}`);
+    addAlias(seen, `conversation:${base}`);
+    addAlias(seen, `direct:${base}`);
+    if (loweredChannelId) {
+      addAlias(seen, `${loweredChannelId}:${base}`);
+      addAlias(seen, `${loweredChannelId}:user:${base}`);
+      addAlias(seen, `${loweredChannelId}:channel:${base}`);
+      addAlias(seen, `${loweredChannelId}:chat:${base}`);
+      addAlias(seen, `${loweredChannelId}:conversation:${base}`);
+      addAlias(seen, `${loweredChannelId}:direct:${base}`);
+    }
+  }
+
+  return [...seen];
+}
+
 export function buildLooseRouteKey({ channelId, accountId, target }) {
   return `${channelId || ""}::${normalizeAccountId(accountId)}::${target || ""}`;
 }
@@ -72,6 +156,34 @@ export function pickRouteTargets(route) {
     if (normalized) {
       targets.add(normalized);
     }
+  }
+  return [...targets];
+}
+
+export function extractTargetsFromSessionKey(sessionKey) {
+  if (typeof sessionKey !== "string") {
+    return [];
+  }
+  const parts = sessionKey.split(":");
+  if (parts.length < 6 || parts[0] !== "agent") {
+    return [];
+  }
+
+  const routeKind = normalizeTarget(parts[4]);
+  const routeValue = normalizeTarget(parts.slice(5).join(":"));
+  if (!routeKind || !routeValue) {
+    return [];
+  }
+
+  const targets = new Set([`${routeKind}:${routeValue}`, routeValue]);
+  if (routeKind === "direct") {
+    targets.add(`user:${routeValue}`);
+    targets.add(`conversation:${routeValue}`);
+  }
+  if (routeKind === "channel" || routeKind === "group") {
+    targets.add(`channel:${routeValue}`);
+    targets.add(`chat:${routeValue}`);
+    targets.add(`conversation:${routeValue}`);
   }
   return [...targets];
 }
@@ -164,6 +276,9 @@ export async function copyFileUtf8(source, target) {
 
 export function formatUtcTimestamp(value) {
   const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "unknown time";
+  }
   const iso = date.toISOString();
   return `${iso.slice(0, 10)} ${iso.slice(11, 19)} UTC`;
 }
@@ -171,4 +286,3 @@ export function formatUtcTimestamp(value) {
 export function stableStringify(value) {
   return JSON.stringify(value, Object.keys(value).sort());
 }
-

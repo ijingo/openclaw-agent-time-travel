@@ -1,7 +1,6 @@
 import fs from "node:fs/promises";
 import {
   DEFAULT_VERSIONS_LIMIT,
-  PENDING_TAG_TTL_MS,
   VERSION_KIND_ASSISTANT,
   VERSION_KIND_BACKUP,
   WORKSPACE_POLL_INTERVAL_MS,
@@ -23,14 +22,15 @@ import {
 import { buildWorkspaceFingerprint } from "./tracked-files.js";
 import { createSessionRoutingIndex } from "./session-routing.js";
 import {
-  buildLooseRouteKey,
   compactSummary,
   createVersionTag,
   ensureDir,
   ensureVersionTag,
+  expandTargetAliases,
   formatUtcTimestamp,
   isAssistantMessage,
   listConfiguredAgentIds,
+  normalizeAccountId,
   parseAgentIdFromSessionKey,
   parsePositiveLimit,
   resolveDefaultAgentId,
@@ -59,15 +59,17 @@ function clearSessionRuntimeFields(entry) {
   return next;
 }
 
-function appendTagToText(text, tag) {
-  const trimmed = typeof text === "string" ? text.trimEnd() : "";
-  if (!trimmed) {
-    return text;
+function collectCommandTargetCandidates(ctx) {
+  const candidates = new Set();
+  for (const raw of [ctx?.senderId, ctx?.from, ctx?.to]) {
+    if (typeof raw !== "string" || !raw.trim()) {
+      continue;
+    }
+    for (const alias of expandTargetAliases(raw, ctx?.channelId ?? ctx?.channel)) {
+      candidates.add(alias);
+    }
   }
-  if (trimmed.includes(tag)) {
-    return trimmed;
-  }
-  return `${trimmed}\n\n${tag}`;
+  return candidates;
 }
 
 export function createTimeTravelController(api) {
@@ -75,7 +77,6 @@ export function createTimeTravelController(api) {
   const pluginStateRoot = resolvePluginStateRoot(api.runtime.state.resolveStateDir());
   const managers = new Map();
   const preparedVersions = new Map();
-  const pendingRouteTags = new Map();
   let transcriptUnsubscribe = null;
   let pollTimer = null;
 
@@ -96,15 +97,6 @@ export function createTimeTravelController(api) {
     if (!queue) {
       queue = [];
       preparedVersions.set(sessionKey, queue);
-    }
-    return queue;
-  }
-
-  function getPendingRouteQueue(routeKey) {
-    let queue = pendingRouteTags.get(routeKey);
-    if (!queue) {
-      queue = [];
-      pendingRouteTags.set(routeKey, queue);
     }
     return queue;
   }
@@ -154,30 +146,6 @@ export function createTimeTravelController(api) {
     }
   }
 
-  function cleanupPendingRouteTags(now = Date.now()) {
-    for (const [routeKey, queue] of pendingRouteTags.entries()) {
-      const filtered = queue.filter((entry) => now - entry.createdAt <= PENDING_TAG_TTL_MS);
-      if (filtered.length === 0) {
-        pendingRouteTags.delete(routeKey);
-        continue;
-      }
-      pendingRouteTags.set(routeKey, filtered);
-    }
-  }
-
-  function queuePreparedTagForRoute(sessionKey, tag, summary) {
-    const routeKeys = routing.buildLooseRouteKeysForSession(sessionKey);
-    if (routeKeys.length === 0) {
-      return;
-    }
-    const createdAt = Date.now();
-    for (const routeKey of routeKeys) {
-      const queue = getPendingRouteQueue(routeKey);
-      queue.push({ tag, sessionKey, createdAt, summary });
-    }
-    cleanupPendingRouteTags(createdAt);
-  }
-
   function resolveSessionStoreEntry(store, sessionKey) {
     if (!store || typeof store !== "object" || !sessionKey) {
       return {
@@ -219,72 +187,11 @@ export function createTimeTravelController(api) {
     };
   }
 
-  function buildMessageSendingRouteKeys(event, ctx) {
-    const keys = new Set();
-    for (const target of [event?.to, ctx?.conversationId]) {
-      if (typeof target !== "string" || !target.trim()) {
-        continue;
-      }
-      keys.add(
-        buildLooseRouteKey({
-          channelId: ctx.channelId,
-          accountId: ctx.accountId,
-          target,
-        }),
-      );
-    }
-    return [...keys];
-  }
-
-  function consumePendingRouteTag(candidateKeys) {
-    let selected = null;
-
-    for (const routeKey of candidateKeys) {
-      const queue = pendingRouteTags.get(routeKey);
-      if (!queue || queue.length === 0) {
-        continue;
-      }
-      queue.sort((a, b) => a.createdAt - b.createdAt);
-      const candidate = queue[0];
-      if (!candidate) {
-        continue;
-      }
-      if (!selected || candidate.createdAt < selected.createdAt) {
-        selected = candidate;
-      }
-    }
-
-    if (!selected) {
-      return null;
-    }
-
-    for (const [routeKey, queue] of pendingRouteTags.entries()) {
-      const filtered = queue.filter((entry) => entry.tag !== selected.tag);
-      if (filtered.length === 0) {
-        pendingRouteTags.delete(routeKey);
-        continue;
-      }
-      if (filtered.length !== queue.length) {
-        pendingRouteTags.set(routeKey, filtered);
-      }
-    }
-
-    return selected;
-  }
-
   function clearPreparedStateForSession(sessionKey) {
     if (!sessionKey) {
       return;
     }
     preparedVersions.delete(sessionKey);
-    for (const [routeKey, queue] of pendingRouteTags.entries()) {
-      const filtered = queue.filter((entry) => entry.sessionKey !== sessionKey);
-      if (filtered.length === 0) {
-        pendingRouteTags.delete(routeKey);
-        continue;
-      }
-      pendingRouteTags.set(routeKey, filtered);
-    }
   }
 
   async function syncAgentWorkspace(agentId, reason) {
@@ -355,18 +262,97 @@ export function createTimeTravelController(api) {
     });
   }
 
-  function resolveCurrentSessionKeyForCommand(ctx) {
+  async function resolveCurrentSessionKeyForCommand(ctx) {
     if (!ensureHooksEnabled()) {
       return null;
     }
-    return routing.resolveSessionKeyForCommand({
+    const routed = routing.resolveSessionKeyForCommand({
       channel: ctx.channel,
       channelId: ctx.channelId ?? ctx.channel,
       accountId: ctx.accountId,
+      senderId: ctx.senderId,
       from: ctx.from,
       to: ctx.to,
       messageThreadId: ctx.messageThreadId,
     });
+    if (routed) {
+      return routed;
+    }
+
+    const channelId = ctx.channelId ?? ctx.channel;
+    const accountId = normalizeAccountId(ctx.accountId);
+    const candidates = collectCommandTargetCandidates(ctx);
+    let best = null;
+
+    for (const agentId of listConfiguredAgentIds(api.config)) {
+      let store;
+      try {
+        const storePath = api.runtime.agent.session.resolveStorePath(api.config?.session?.store, {
+          agentId,
+        });
+        store = api.runtime.agent.session.loadSessionStore(storePath, { skipCache: true });
+      } catch (error) {
+        logWarn(
+          `time-travel could not scan session store for agent ${agentId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        continue;
+      }
+      for (const [sessionKey, entry] of Object.entries(store ?? {})) {
+        if (!entry || typeof entry !== "object") {
+          continue;
+        }
+        const entryChannel =
+          entry.lastChannel ||
+          entry.deliveryContext?.channel ||
+          entry.origin?.surface ||
+          entry.origin?.provider;
+        if (entryChannel !== channelId) {
+          continue;
+        }
+        const entryAccountId = normalizeAccountId(
+          entry.deliveryContext?.accountId || entry.origin?.accountId || entry.accountId,
+        );
+        if (entryAccountId !== accountId) {
+          continue;
+        }
+
+        if (candidates.size > 0) {
+          const entryTargets = new Set();
+          for (const raw of [
+            entry.lastTo,
+            entry.deliveryContext?.to,
+            entry.origin?.from,
+            entry.origin?.to,
+          ]) {
+            if (typeof raw !== "string" || !raw.trim()) {
+              continue;
+            }
+            for (const alias of expandTargetAliases(raw, channelId)) {
+              entryTargets.add(alias);
+            }
+          }
+          const matches = [...candidates].some((candidate) => entryTargets.has(candidate));
+          if (!matches) {
+            continue;
+          }
+        }
+
+        const updatedAt = Number(entry.updatedAt ?? 0);
+        if (!best || updatedAt > best.updatedAt) {
+          best = {
+            sessionKey,
+            updatedAt,
+          };
+        }
+      }
+    }
+
+    if (best?.sessionKey) {
+      logInfo(`time-travel recovered routed session ${best.sessionKey} from session store`);
+      return best.sessionKey;
+    }
+
+    return null;
   }
 
   async function rewindToVersion(sessionKey, version) {
@@ -503,9 +489,11 @@ export function createTimeTravelController(api) {
       routing.rememberInbound(event);
     },
 
-    prepareAssistantVersion(sessionKey, message) {
+    handleBeforeMessageWrite(event, ctx) {
+      const sessionKey = ctx?.sessionKey ?? event?.sessionKey;
+      const message = event?.message;
       if (!sessionKey || !isAssistantMessage(message)) {
-        return;
+        return undefined;
       }
       const queue = getPreparedQueue(sessionKey);
       const prepared = {
@@ -514,7 +502,7 @@ export function createTimeTravelController(api) {
         createdAt: Date.now(),
       };
       queue.push(prepared);
-      queuePreparedTagForRoute(sessionKey, prepared.tag, prepared.summary);
+      return undefined;
     },
 
     async handleAfterToolCall(toolCtx) {
@@ -531,62 +519,67 @@ export function createTimeTravelController(api) {
       return undefined;
     },
 
-    handleMessageSending(event, ctx) {
-      cleanupPendingRouteTags();
-      const selected = consumePendingRouteTag(buildMessageSendingRouteKeys(event, ctx));
-      if (!selected) {
-        return undefined;
-      }
-      return {
-        content: appendTagToText(event.content, selected.tag),
-      };
-    },
-
     async handleVersionsCommand(ctx) {
-      if (!ensureHooksEnabled()) {
-        return {
-          text:
-            "Time Travel requires `hooks.internal.enabled: true`.\n\n" +
-            "Enable it in OpenClaw config, then retry.",
-        };
-      }
+      try {
+        if (!ensureHooksEnabled()) {
+          return {
+            text:
+              "Time Travel requires `hooks.internal.enabled: true`.\n\n" +
+              "Enable it in OpenClaw config, then retry.",
+          };
+        }
 
-      const sessionKey = resolveCurrentSessionKeyForCommand(ctx);
-      if (!sessionKey) {
-        return {
-          text:
-            "No current routed session could be resolved for this conversation.\n\n" +
-            "Send a normal message in this chat first, then retry `/versions`.",
-        };
-      }
+        const sessionKey = await resolveCurrentSessionKeyForCommand(ctx);
+        if (!sessionKey) {
+          return {
+            text:
+              "No current routed session could be resolved for this conversation.\n\n" +
+              "Send a normal message in this chat first, then retry `/versions`.",
+          };
+        }
 
-      const rawArgs = (ctx.args ?? "").trim();
-      const limit = rawArgs ? parsePositiveLimit(rawArgs) : DEFAULT_VERSIONS_LIMIT;
-      if (rawArgs && !limit) {
-        return { text: "Usage: /versions [n]" };
-      }
+        const rawArgs =
+          typeof ctx.args === "string" ? ctx.args.trim() : String(ctx.args ?? "").trim();
+        const limit = rawArgs ? parsePositiveLimit(rawArgs) : DEFAULT_VERSIONS_LIMIT;
+        if (rawArgs && !limit) {
+          return { text: "Usage: /versions [n]" };
+        }
 
-      const agentId = parseAgentIdFromSessionKey(sessionKey);
-      const manager = await ensureManager(agentId);
-      const versions = await listVersionsForSession(manager.agentStateDir, sessionKey, {
-        limit: limit ?? DEFAULT_VERSIONS_LIMIT,
-      });
+        const agentId = parseAgentIdFromSessionKey(sessionKey);
+        const manager = await ensureManager(agentId);
+        const versions = await listVersionsForSession(manager.agentStateDir, sessionKey, {
+          limit: limit ?? DEFAULT_VERSIONS_LIMIT,
+        });
 
-      if (versions.length === 0) {
-        return { text: "No rewindable versions exist for this conversation yet." };
-      }
+        if (versions.length === 0) {
+          return { text: "No rewindable versions exist for this conversation yet." };
+        }
 
-      const lines = [];
-      lines.push(`Versions for ${sessionKey}:`);
-      lines.push("");
-      for (const version of versions) {
-        const shadow = version.shadowCommit ? version.shadowCommit.slice(0, 7) : "none";
-        lines.push(
-          `- ${version.tag} | ${formatUtcTimestamp(version.createdAt)} | git ${shadow} | ${version.summary}`,
+        const lines = [];
+        lines.push(`Versions for ${sessionKey}:`);
+        lines.push("");
+        for (const version of versions) {
+          const shadow = version.shadowCommit ? version.shadowCommit.slice(0, 7) : "none";
+          const summary =
+            typeof version.summary === "string" && version.summary.trim()
+              ? version.summary.trim()
+              : "[no summary]";
+          lines.push(
+            `- ${version.tag} | ${formatUtcTimestamp(version.createdAt)} | git ${shadow} | ${summary}`,
+          );
+        }
+
+        return { text: lines.join("\n") };
+      } catch (error) {
+        logWarn(
+          `time-travel /versions failed for channel=${ctx?.channel || "unknown"} sender=${ctx?.senderId || "unknown"}: ${error instanceof Error ? error.stack || error.message : String(error)}`,
         );
+        return {
+          text:
+            "Time Travel hit an internal error while loading versions.\n\n" +
+            "Retry once; if it still fails, check gateway logs for `time-travel /versions failed`.",
+        };
       }
-
-      return { text: lines.join("\n") };
     },
 
     async handleRewindCommand(ctx) {
@@ -603,7 +596,7 @@ export function createTimeTravelController(api) {
         return { text: "Usage: /rewind <tag>" };
       }
 
-      const sessionKey = resolveCurrentSessionKeyForCommand(ctx);
+      const sessionKey = await resolveCurrentSessionKeyForCommand(ctx);
       if (!sessionKey) {
         return {
           text:
