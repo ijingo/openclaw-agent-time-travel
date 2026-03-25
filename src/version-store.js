@@ -56,13 +56,21 @@ export async function findVersionByTag(agentStateDir, tag) {
 }
 
 export async function listVersionsForSession(agentStateDir, sessionKey, options = {}) {
-  const { limit = 10, includeBackups = false } = options;
+  const { limit = 10, offset = 0, includeBackups = false } = options;
   const records = await loadVersionRecords(agentStateDir);
   return records
     .filter((record) => record.sessionKey === sessionKey)
     .filter((record) => includeBackups || record.kind !== "backup")
     .sort((a, b) => Number(b.createdAt ?? 0) - Number(a.createdAt ?? 0))
-    .slice(0, limit);
+    .slice(offset, offset + limit);
+}
+
+export async function countVersionsForSession(agentStateDir, sessionKey, options = {}) {
+  const { includeBackups = false } = options;
+  const records = await loadVersionRecords(agentStateDir);
+  return records
+    .filter((record) => record.sessionKey === sessionKey)
+    .filter((record) => includeBackups || record.kind !== "backup").length;
 }
 
 export async function writeSnapshotFiles(agentStateDir, tag, payload) {

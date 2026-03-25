@@ -11,6 +11,7 @@ import {
 } from "./shadow-repo.js";
 import {
   appendVersionRecord,
+  countVersionsForSession,
   findVersionByTag,
   listVersionsForSession,
   readTranscriptSnapshot,
@@ -540,24 +541,59 @@ export function createTimeTravelController(api) {
 
         const rawArgs =
           typeof ctx.args === "string" ? ctx.args.trim() : String(ctx.args ?? "").trim();
-        const limit = rawArgs ? parsePositiveLimit(rawArgs) : DEFAULT_VERSIONS_LIMIT;
-        if (rawArgs && !limit) {
-          return { text: "Usage: /versions [n]" };
+        let limit = DEFAULT_VERSIONS_LIMIT;
+        let page = 1;
+
+        if (rawArgs) {
+          const tokens = rawArgs.split(/\s+/).filter(Boolean);
+          if (tokens.length === 1) {
+            const parsedLimit = parsePositiveLimit(tokens[0]);
+            if (!parsedLimit) {
+              return { text: "Usage: /versions [n]\nUsage: /versions page <n>" };
+            }
+            limit = parsedLimit;
+          } else if (tokens.length === 2 && tokens[0].toLowerCase() === "page") {
+            const parsedPage = parsePositiveLimit(tokens[1]);
+            if (!parsedPage) {
+              return { text: "Usage: /versions [n]\nUsage: /versions page <n>" };
+            }
+            page = parsedPage;
+          } else {
+            return { text: "Usage: /versions [n]\nUsage: /versions page <n>" };
+          }
         }
 
         const agentId = parseAgentIdFromSessionKey(sessionKey);
         const manager = await ensureManager(agentId);
-        const versions = await listVersionsForSession(manager.agentStateDir, sessionKey, {
-          limit: limit ?? DEFAULT_VERSIONS_LIMIT,
-        });
-
-        if (versions.length === 0) {
+        const total = await countVersionsForSession(manager.agentStateDir, sessionKey);
+        if (total === 0) {
           return { text: "No rewindable versions exist for this conversation yet." };
         }
+
+        const offset = (page - 1) * limit;
+        const totalPages = Math.max(1, Math.ceil(total / limit));
+        if (offset >= total) {
+          return {
+            text:
+              `No versions on page ${page}.\n\n` +
+              `This conversation has ${total} version(s) across ${totalPages} page(s).`,
+          };
+        }
+
+        const versions = await listVersionsForSession(manager.agentStateDir, sessionKey, {
+          limit,
+          offset,
+        });
 
         const lines = [];
         lines.push(`Versions for ${sessionKey}:`);
         lines.push("");
+        if (rawArgs.toLowerCase().startsWith("page ")) {
+          const start = offset + 1;
+          const end = offset + versions.length;
+          lines.push(`Page ${page} of ${totalPages} · showing ${start}-${end} of ${total}`);
+          lines.push("");
+        }
         for (const version of versions) {
           const shadow = version.shadowCommit ? version.shadowCommit.slice(0, 7) : "none";
           const summary =
